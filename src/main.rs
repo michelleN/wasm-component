@@ -44,5 +44,7 @@ fn inspect(path: &str) -> Result<(), std::io::Error> {
         .spawn()
         .expect("Failed to run the binary");
 
+    // TODO: the third piece of this is to wire up cargo doc to make the generated bindings cute
+
     Ok(())
 }
