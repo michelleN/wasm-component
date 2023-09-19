@@ -1,9 +1,8 @@
 use clap::{Parser, Subcommand};
-use std::env::temp_dir;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{self, PathBuf};
-use std::process::{Command, CommandArgs};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::sleep;
@@ -42,7 +41,7 @@ fn inspect(path: &str) -> Result<(), std::io::Error> {
     }
 
     let tmp_dir = TempDir::new("example")?;
-    let file_path = tmp_dir.path().join("guest.wit");
+    let file_path = &tmp_dir.path().join("guest.wit");
 
     Command::new("wasm-tools")
         .args(["component", "wit", path, "-o", file_path.to_str().unwrap()])
@@ -64,7 +63,7 @@ fn inspect(path: &str) -> Result<(), std::io::Error> {
         .spawn()
         .expect("Failed to run the binary");
 
-    generate_cargo_toml(file_path.join("Cargo.toml"));
+    generate_cargo_toml(tmp_dir.path().join("Cargo.toml"));
 
     // TODO: hide/redirect stdout
     let mut child = Command::new("cargo")
@@ -72,6 +71,7 @@ fn inspect(path: &str) -> Result<(), std::io::Error> {
             "doc",
             "--manifest-path",
             tmp_dir.path().join("Cargo.toml").to_str().unwrap(),
+            // "--open",
         ])
         .spawn()
         .expect("Failed to gen docs");
@@ -100,7 +100,8 @@ fn inspect(path: &str) -> Result<(), std::io::Error> {
 }
 
 fn generate_cargo_toml(filepath: PathBuf) {
-    let mut file = File::create(filepath).unwrap();
+    let mut file = File::create(filepath.clone())
+        .expect(format!("Unable to create file {:?}", filepath).as_str());
 
     // TODO: package name same as world name
     file.write_all(
