@@ -71,7 +71,7 @@ fn inspect(path: &str) -> Result<(), std::io::Error> {
             "doc",
             "--manifest-path",
             tmp_dir.path().join("Cargo.toml").to_str().unwrap(),
-            // "--open",
+            "--open",
         ])
         .spawn()
         .expect("Failed to gen docs");
