@@ -7,5 +7,5 @@ This tool is a prototype to understand what experience helps people search, disc
 ```bash
 # create component at path component.wasm
 
-$ cargo run inspect component.wasm
+$ cargo run inspect compose.wasm
 ```
