@@ -1,12 +1,11 @@
 use clap::{Parser, Subcommand};
+use core::panic;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{self, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::sleep;
-use std::time::Duration;
 use tempdir::TempDir;
 
 #[derive(Parser)]
@@ -33,40 +32,27 @@ fn main() {
     }
 }
 
-fn inspect(path: &str) -> Result<(), std::io::Error> {
-    let p = path::Path::new(&path);
-
+fn inspect(wasm_path: &str) -> Result<(), anyhow::Error> {
+    let p = path::Path::new(&wasm_path);
     if !p.exists() {
-        panic!("Error: The file {} does not exist", path);
+        panic!("Error: The file {} does not exist", wasm_path);
     }
 
-    let tmp_dir = TempDir::new("example")?;
-    let file_path = &tmp_dir.path().join("guest.wit");
+    let tmp_dir = TempDir::new("wasm-component")?;
+    let guest_path = &tmp_dir.path().join("guest.wit");
+    let wit_path = guest_path.to_str().unwrap();
 
-    Command::new("wasm-tools")
-        .args(["component", "wit", path, "-o", file_path.to_str().unwrap()])
-        .spawn()
-        .expect("Failed to run the binary");
+    generate_wit_file_from_wasm(wit_path, wasm_path)?;
+    flip_wit(wit_path).unwrap();
 
-    sleep(Duration::new(3, 0)); // TODO
+    let world_name: String = get_world_name(wasm_path)?;
 
-    flip_wit(file_path.to_str().unwrap()).unwrap();
+    generate_bindings(wit_path, &tmp_dir)?;
 
-    // TODO: really need name of the world at this point
-    Command::new("wit-bindgen")
-        .args([
-            "rust",
-            file_path.to_str().unwrap(),
-            "--out-dir",
-            tmp_dir.path().join("src").to_str().unwrap(),
-        ])
-        .spawn()
-        .expect("Failed to run the binary");
+    generate_cargo_toml(tmp_dir.path().join("Cargo.toml"), world_name.clone());
 
-    generate_cargo_toml(tmp_dir.path().join("Cargo.toml"));
-
-    // TODO: hide/redirect stdout
-    let mut child = Command::new("cargo")
+    // TODO: hide/redirect stdout, hide deps?
+    let child = Command::new("cargo")
         .args([
             "doc",
             "--manifest-path",
@@ -76,16 +62,23 @@ fn inspect(path: &str) -> Result<(), std::io::Error> {
         .spawn()
         .expect("Failed to gen docs");
 
-    child.wait()?;
-
-    println!(
-        "Documentation at {}",
-        tmp_dir
-            .path()
-            .join("target/doc/root/index.html")
-            .to_str()
-            .unwrap()
-    );
+    if child
+        .wait_with_output()
+        .expect("error generating docs")
+        .status
+        .success()
+    {
+        println!(
+            "Documentation at {}",
+            tmp_dir
+                .path()
+                .join(format!("target/doc/{}/index.html", world_name.clone()))
+                .to_str()
+                .unwrap()
+        );
+    } else {
+        panic!("error generating docs")
+    };
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -99,28 +92,32 @@ fn inspect(path: &str) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn generate_cargo_toml(filepath: PathBuf) {
+fn generate_cargo_toml(filepath: PathBuf, world_name: String) {
     let mut file = File::create(filepath.clone())
         .expect(format!("Unable to create file {:?}", filepath).as_str());
 
     // TODO: package name same as world name
     file.write_all(
-        r#"[package]
-                name = "root"
+        format!(
+            r#"[package]
+                name = "{}"
                 version = "0.1.0"
                 edition = "2021"
 
                 [lib]
-                path = "src/root.rs"
+                path = "src/{}.rs"
 
                 [dependencies]
                 wit-bindgen = "0.11.0"
-        "#
+        "#,
+            world_name, world_name
+        )
         .as_bytes(),
     )
-    .unwrap();
+    .expect("error writing Cargo toml");
 }
-// This function reads th wit file at the given path. It removes any
+
+// This function reads the wit file at the given path. It removes any
 // exports and replaces them with imports. It deletes any lines that are imports.
 // It then writes the new wit at a new path.
 // TODO: In the future, we probably want to parse the wit file and do more sophisticated
@@ -163,4 +160,56 @@ fn flip_wit(wit_path: &str) -> Result<(), std::io::Error> {
         .expect("Unable to write data");
 
     Ok(())
+}
+
+fn generate_wit_file_from_wasm(wit_path: &str, wasm_path: &str) -> Result<(), anyhow::Error> {
+    let mut wit_out = Command::new("wasm-tools")
+        .args(["component", "wit", wasm_path, "-o", wit_path])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to run the binary");
+    wit_out.wait().unwrap();
+
+    Ok(())
+}
+
+fn generate_bindings(wit_path: &str, tmp_dir: &TempDir) -> Result<(), anyhow::Error> {
+    let mut gen_out = Command::new("wit-bindgen")
+        .args([
+            "rust",
+            wit_path,
+            "--out-dir",
+            tmp_dir.path().join("src").to_str().unwrap(),
+        ])
+        .spawn()
+        .expect("Failed to run the binary");
+    gen_out.wait()?;
+    Ok(())
+}
+
+fn get_world_name(wasm_path: &str) -> Result<String, anyhow::Error> {
+    let out = Command::new("wasm-tools")
+        .args(["component", "wit", wasm_path, "--json"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to run the binary");
+    let json_out = out.wait_with_output().unwrap();
+    let parsed_json: Result<serde_json::Value, serde_json::Error> = if json_out.status.success() {
+        let stdout = String::from_utf8_lossy(&json_out.stdout);
+        serde_json::from_str(&stdout)
+    } else {
+        panic!("error here")
+    };
+    let parsed = parsed_json?;
+    let world_name = match parsed
+        .get("worlds")
+        .and_then(|a| a.as_array())
+        .and_then(|x| x.get(0))
+        .and_then(|a| a.get("name"))
+        .and_then(|a| a.as_str())
+    {
+        Some(n) => n.to_string(),
+        None => panic!("cant find world name"),
+    };
+    Ok(world_name)
 }
