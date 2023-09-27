@@ -12,84 +12,106 @@ use tempdir::TempDir;
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>,
+    command: Option<Commands>, // TODO remove option
 }
 
 #[derive(Subcommand)]
 enum Commands {
     /// Inspect the wit file of a component
-    Inspect { path: String },
+    Inspect(Inspect),
+}
+
+/// Inspect given wasm file
+#[derive(Parser, Debug)]
+pub struct Inspect {
+    path: String,
+
+    /// Language to generate docs for bindings
+    #[clap(long = "lang", short = 'l', value_parser = parse_lang)]
+    pub language: String,
+}
+
+fn parse_lang(name: &str) -> Result<String, String> {
+    match name.to_lowercase().as_str() {
+        "rust" => Ok(name.to_owned()),
+        _ => Err("Following languages are currently supported: rust".to_owned()),
+    }
 }
 
 fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Commands::Inspect { path }) => {
-            inspect(path).unwrap();
+        Some(Commands::Inspect(i)) => {
+            i.run().unwrap();
         }
         None => {}
     }
 }
 
-fn inspect(wasm_path: &str) -> Result<(), anyhow::Error> {
-    let p = path::Path::new(&wasm_path);
-    if !p.exists() {
-        panic!("Error: The file {} does not exist", wasm_path);
+impl Inspect {
+    pub fn run(&self) -> Result<(), anyhow::Error> {
+        let wasm_path = &self.path;
+        let p = path::Path::new(&wasm_path);
+        if !p.exists() {
+            panic!("Error: The file {} does not exist", wasm_path);
+        }
+
+        let tmp_dir = TempDir::new("wasm-component")?;
+        let guest_path = &tmp_dir.path().join("guest.wit");
+        let wit_path = guest_path.to_str().unwrap();
+
+        generate_wit_file_from_wasm(wit_path, wasm_path)?;
+        // TODO: if lang is not provided, return wit file here
+
+        flip_wit(wit_path).unwrap();
+
+        let world_name: String = get_world_name(wasm_path)?;
+
+        generate_bindings(wit_path, &tmp_dir)?;
+
+        generate_cargo_toml(tmp_dir.path().join("Cargo.toml"), world_name.clone());
+
+        // TODO: hide/redirect stdout, hide deps?
+        let child = Command::new("cargo")
+            .args([
+                "doc",
+                "--manifest-path",
+                tmp_dir.path().join("Cargo.toml").to_str().unwrap(),
+                "--open",
+            ])
+            .spawn()
+            .expect("Failed to gen docs");
+
+        if child
+            .wait_with_output()
+            .expect("error generating docs")
+            .status
+            .success()
+        {
+            println!(
+                "Documentation at {}",
+                tmp_dir
+                    .path()
+                    .join(format!("target/doc/{}/index.html", world_name.clone()))
+                    .to_str()
+                    .unwrap()
+            );
+        } else {
+            panic!("error generating docs")
+        };
+
+        let running = Arc::new(AtomicBool::new(true));
+        let r = running.clone();
+        ctrlc::set_handler(move || {
+            r.store(false, Ordering::SeqCst); // TODO: figure out what this does (from example)
+            println!("received Ctrl+C!");
+        })
+        .expect("Error setting Ctrl-C handler");
+
+        while running.load(Ordering::SeqCst) {}
+        Ok(())
     }
-
-    let tmp_dir = TempDir::new("wasm-component")?;
-    let guest_path = &tmp_dir.path().join("guest.wit");
-    let wit_path = guest_path.to_str().unwrap();
-
-    generate_wit_file_from_wasm(wit_path, wasm_path)?;
-    flip_wit(wit_path).unwrap();
-
-    let world_name: String = get_world_name(wasm_path)?;
-
-    generate_bindings(wit_path, &tmp_dir)?;
-
-    generate_cargo_toml(tmp_dir.path().join("Cargo.toml"), world_name.clone());
-
-    // TODO: hide/redirect stdout, hide deps?
-    let child = Command::new("cargo")
-        .args([
-            "doc",
-            "--manifest-path",
-            tmp_dir.path().join("Cargo.toml").to_str().unwrap(),
-            "--open",
-        ])
-        .spawn()
-        .expect("Failed to gen docs");
-
-    if child
-        .wait_with_output()
-        .expect("error generating docs")
-        .status
-        .success()
-    {
-        println!(
-            "Documentation at {}",
-            tmp_dir
-                .path()
-                .join(format!("target/doc/{}/index.html", world_name.clone()))
-                .to_str()
-                .unwrap()
-        );
-    } else {
-        panic!("error generating docs")
-    };
-
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst); // TODO: figure out what this does (from example)
-        println!("received Ctrl+C!");
-    })
-    .expect("Error setting Ctrl-C handler");
-
-    while running.load(Ordering::SeqCst) {}
-    Ok(())
 }
 
 fn generate_cargo_toml(filepath: PathBuf, world_name: String) {
