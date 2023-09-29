@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use core::panic;
+use std::env::current_dir;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{self, PathBuf};
@@ -24,6 +25,7 @@ enum Commands {
 /// Inspect given wasm file
 #[derive(Parser, Debug)]
 pub struct Inspect {
+    /// Path to wit file
     path: String,
 
     /// Language to generate docs for bindings
@@ -34,7 +36,8 @@ pub struct Inspect {
 fn parse_lang(name: &str) -> Result<String, String> {
     match name.to_lowercase().as_str() {
         "rust" => Ok(name.to_owned()),
-        _ => Err("Following languages are currently supported: rust".to_owned()),
+        "python" => Ok(name.to_owned()),
+        _ => Err("Following languages are currently supported: rust, python".to_owned()),
     }
 }
 
@@ -57,8 +60,8 @@ impl Inspect {
             panic!("Error: The file {} does not exist", wasm_path);
         }
 
-        let tmp_dir = TempDir::new("wasm-component")?;
-        let guest_path = &tmp_dir.path().join("guest.wit");
+        let tmp_dir = TempDir::new("wasm-component")?.into_path();
+        let guest_path = &tmp_dir.as_path().join("guest.wit");
         let wit_path = guest_path.to_str().unwrap();
 
         generate_wit_file_from_wasm(wit_path, wasm_path)?;
@@ -68,38 +71,9 @@ impl Inspect {
 
         let world_name: String = get_world_name(wasm_path)?;
 
-        generate_bindings(wit_path, &tmp_dir)?;
+        generate_bindings(wit_path, &self.language, &world_name, &tmp_dir)?;
 
-        generate_cargo_toml(tmp_dir.path().join("Cargo.toml"), world_name.clone());
-
-        // TODO: hide/redirect stdout, hide deps?
-        let child = Command::new("cargo")
-            .args([
-                "doc",
-                "--manifest-path",
-                tmp_dir.path().join("Cargo.toml").to_str().unwrap(),
-                "--open",
-            ])
-            .spawn()
-            .expect("Failed to gen docs");
-
-        if child
-            .wait_with_output()
-            .expect("error generating docs")
-            .status
-            .success()
-        {
-            println!(
-                "Documentation at {}",
-                tmp_dir
-                    .path()
-                    .join(format!("target/doc/{}/index.html", world_name.clone()))
-                    .to_str()
-                    .unwrap()
-            );
-        } else {
-            panic!("error generating docs")
-        };
+        generate_docs(&self.language, &world_name, &tmp_dir);
 
         let running = Arc::new(AtomicBool::new(true));
         let r = running.clone();
@@ -112,6 +86,78 @@ impl Inspect {
         while running.load(Ordering::SeqCst) {}
         Ok(())
     }
+}
+
+fn generate_docs(lang: &str, world_name: &str, tmp_dir: &PathBuf) {
+    match lang {
+        "rust" => generate_rust_docs(world_name, tmp_dir),
+        "python" => generate_python_docs(world_name, tmp_dir),
+        _ => panic!("Following languages are currently supported: rust, python"),
+    }
+}
+
+fn generate_python_docs(world_name: &str, tmp_dir: &PathBuf) {
+    let child = Command::new("pydoctor")
+        .args([
+            "--make-html",
+            "--html-output",
+            tmp_dir.as_path().join("docs").to_str().unwrap(),
+            tmp_dir.as_path().join(world_name).to_str().unwrap(),
+        ])
+        .spawn()
+        .expect("Failed to gen docs");
+
+    if child
+        .wait_with_output()
+        .expect("error generating docs")
+        .status
+        .success()
+    {
+        println!(
+            "\n\n\nDocumentation is at {}",
+            tmp_dir
+                .as_path()
+                .join("docs")
+                .join("index.html")
+                .to_str()
+                .unwrap(),
+        );
+    } else {
+        panic!("error generating docs")
+    };
+}
+
+fn generate_rust_docs(world_name: &str, tmp_dir: &PathBuf) {
+    generate_cargo_toml(tmp_dir.as_path().join("Cargo.toml"), world_name.to_string());
+
+    // TODO: hide/redirect stdout, hide deps?
+    let child = Command::new("cargo")
+        .args([
+            "doc",
+            "--manifest-path",
+            tmp_dir.as_path().join("Cargo.toml").to_str().unwrap(),
+            "--open",
+        ])
+        .spawn()
+        .expect("Failed to gen docs");
+
+    if child
+        .wait_with_output()
+        .expect("error generating docs")
+        .status
+        .success()
+    {
+        println!(
+            "\n\n\nDocumentation at {}",
+            tmp_dir
+                .as_path()
+                .join(format!("target/doc/{}/index.html", world_name.clone()))
+                .to_str()
+                .unwrap()
+        );
+    } else {
+        panic!("error generating docs")
+    };
 }
 
 fn generate_cargo_toml(filepath: PathBuf, world_name: String) {
@@ -195,18 +241,53 @@ fn generate_wit_file_from_wasm(wit_path: &str, wasm_path: &str) -> Result<(), an
     Ok(())
 }
 
-fn generate_bindings(wit_path: &str, tmp_dir: &TempDir) -> Result<(), anyhow::Error> {
+fn generate_rust_bindings(wit_path: &str, tmp_dir: &PathBuf) -> Result<(), anyhow::Error> {
     let mut gen_out = Command::new("wit-bindgen")
         .args([
             "rust",
             wit_path,
             "--out-dir",
-            tmp_dir.path().join("src").to_str().unwrap(),
+            tmp_dir.as_path().join("src").to_str().unwrap(),
         ])
         .spawn()
         .expect("Failed to run the binary");
     gen_out.wait()?;
     Ok(())
+}
+
+fn generate_python_bindings(
+    wit_path: &str,
+    world_name: &str,
+    tmp_dir: &PathBuf,
+) -> Result<(), anyhow::Error> {
+    let mut gen_out = Command::new("componentize-py")
+        .args([
+            "-d",
+            wit_path,
+            "-w",
+            world_name,
+            "bindings",
+            // tmp_dir.as_path().join(world_name).to_str().unwrap(),
+            tmp_dir.as_path().to_str().unwrap(),
+        ])
+        .spawn()
+        .expect("Failed to run the binary");
+    gen_out.wait().unwrap();
+
+    Ok(())
+}
+
+fn generate_bindings(
+    wit_path: &str,
+    lang: &str,
+    world_name: &str,
+    tmp_dir: &PathBuf,
+) -> Result<(), anyhow::Error> {
+    match lang {
+        "rust" => generate_rust_bindings(wit_path, tmp_dir),
+        "python" => generate_python_bindings(wit_path, world_name, tmp_dir),
+        _ => panic!("Following languages are currently supported: rust, python"),
+    }
 }
 
 fn get_world_name(wasm_path: &str) -> Result<String, anyhow::Error> {
