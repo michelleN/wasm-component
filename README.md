@@ -7,7 +7,7 @@ This tool is a prototype to understand what experience helps people search, disc
 ```bash
 # create component at path compose.wasm or use the compose.wasm included in this repo
 
-$ cargo run inspect compose.wasm
+$ cargo run inspect compose.wasm --lang rust
 ```
 
 ## Generate a test .wasm from a WIT
